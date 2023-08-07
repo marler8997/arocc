@@ -36,7 +36,7 @@ preserveTokens: ?*const fn (*Pragma, *Preprocessor, start_idx: TokenIndex) bool 
 
 /// Same as preprocessorHandler except called during parsing
 /// The parser's `p.tok_i` field must not be changed
-parserHandler: ?*const fn (*Pragma, *Parser, start_idx: TokenIndex) Compilation.Error!void = null,
+parserHandler: ?*const fn (*Pragma, *Preprocessor, *Parser, start_idx: TokenIndex) Compilation.Error!void = null,
 
 pub fn pasteTokens(pp: *Preprocessor, start_idx: TokenIndex) ![]const u8 {
     if (pp.tokens.get(start_idx).id == .nl) return error.ExpectedStringLiteral;
@@ -76,8 +76,8 @@ pub fn preprocessorCB(self: *Pragma, pp: *Preprocessor, start_idx: TokenIndex) E
     if (self.preprocessorHandler) |func| return func(self, pp, start_idx);
 }
 
-pub fn parserCB(self: *Pragma, p: *Parser, start_idx: TokenIndex) Compilation.Error!void {
+pub fn parserCB(self: *Pragma, pp: *Preprocessor, p: *Parser, start_idx: TokenIndex) Compilation.Error!void {
     const tok_index = p.tok_i;
     defer std.debug.assert(tok_index == p.tok_i);
-    if (self.parserHandler) |func| return func(self, p, start_idx);
+    if (self.parserHandler) |func| return func(self, pp, p, start_idx);
 }

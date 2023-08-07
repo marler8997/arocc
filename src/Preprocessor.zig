@@ -784,8 +784,8 @@ fn expr(pp: *Preprocessor, tokenizer: *Tokenizer) MacroError!bool {
 
     // Actually parse it.
     var parser = Parser{
-        .pp = pp,
         .comp = pp.comp,
+        .tokens = &pp.tokens,
         .gpa = pp.gpa,
         .tok_ids = pp.tokens.items(.id),
         .tok_i = @intCast(start),
@@ -1167,7 +1167,7 @@ fn reconstructIncludeString(pp: *Preprocessor, param_toks: []const Token) !?[]co
     }
 
     for (params) |tok| {
-        const str = pp.expandedSliceExtra(tok, .preserve_macro_ws);
+        const str = @import("expand.zig").expandedSliceExtra(pp.comp, tok, .preserve_macro_ws);
         try pp.char_buf.appendSlice(str);
     }
 
@@ -1891,29 +1891,9 @@ fn expandMacro(pp: *Preprocessor, tokenizer: *Tokenizer, raw: RawToken) MacroErr
     }
 }
 
-fn expandedSliceExtra(pp: *const Preprocessor, tok: Token, macro_ws_handling: enum { single_macro_ws, preserve_macro_ws }) []const u8 {
-    if (tok.id.lexeme()) |some| {
-        if (!tok.id.allowsDigraphs(pp.comp) and !(tok.id == .macro_ws and macro_ws_handling == .preserve_macro_ws)) return some;
-    }
-    var tmp_tokenizer = Tokenizer{
-        .buf = pp.comp.getSource(tok.loc.id).buf,
-        .comp = pp.comp,
-        .index = tok.loc.byte_offset,
-        .source = .generated,
-    };
-    if (tok.id == .macro_string) {
-        while (true) : (tmp_tokenizer.index += 1) {
-            if (tmp_tokenizer.buf[tmp_tokenizer.index] == '>') break;
-        }
-        return tmp_tokenizer.buf[tok.loc.byte_offset .. tmp_tokenizer.index + 1];
-    }
-    const res = tmp_tokenizer.next();
-    return tmp_tokenizer.buf[res.start..res.end];
-}
-
 /// Get expanded token source string.
 pub fn expandedSlice(pp: *Preprocessor, tok: Token) []const u8 {
-    return pp.expandedSliceExtra(tok, .single_macro_ws);
+    return @import("expand.zig").expandedSlice(pp.comp, tok);
 }
 
 /// Concat two tokens and add the result to pp.generated

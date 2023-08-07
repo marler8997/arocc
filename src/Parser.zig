@@ -6,7 +6,6 @@ const big = std.math.big;
 const Compilation = @import("Compilation.zig");
 const Source = @import("Source.zig");
 const Tokenizer = @import("Tokenizer.zig");
-const Preprocessor = @import("Preprocessor.zig");
 const Tree = @import("Tree.zig");
 const Token = Tree.Token;
 const TokenIndex = Tree.TokenIndex;
@@ -88,9 +87,8 @@ const ConstDeclFoldingMode = enum {
     no_const_decl_folding,
 };
 
-// values from preprocessor
-pp: *Preprocessor,
 comp: *Compilation,
+tokens: *Token.List,
 gpa: mem.Allocator,
 tok_ids: []const Token.Id,
 tok_i: TokenIndex = 0,
@@ -220,7 +218,7 @@ fn eatIdentifier(p: *Parser) !?TokenIndex {
         .extended_identifier => {
             const slice = p.tokSlice(p.tok_i);
             var it = std.unicode.Utf8View.initUnchecked(slice).iterator();
-            var loc = p.pp.tokens.items(.loc)[p.tok_i];
+            var loc = p.tokens.items(.loc)[p.tok_i];
 
             if (mem.indexOfScalar(u8, slice, '$')) |i| {
                 loc.byte_offset += @intCast(i);
@@ -228,7 +226,7 @@ fn eatIdentifier(p: *Parser) !?TokenIndex {
                     .tag = .dollar_in_identifier_extension,
                     .loc = loc,
                 }, &.{});
-                loc = p.pp.tokens.items(.loc)[p.tok_i];
+                loc = p.tokens.items(.loc)[p.tok_i];
             }
 
             while (it.nextCodepoint()) |c| {
@@ -279,7 +277,7 @@ fn expectToken(p: *Parser, expected: Token.Id) Error!TokenIndex {
 
 pub fn tokSlice(p: *Parser, tok: TokenIndex) []const u8 {
     if (p.tok_ids[tok].lexeme()) |some| return some;
-    const loc = p.pp.tokens.items(.loc)[tok];
+    const loc = p.tokens.items(.loc)[tok];
     var tmp_tokenizer = Tokenizer{
         .buf = p.comp.getSource(loc.id).buf,
         .comp = p.comp,
@@ -331,11 +329,11 @@ pub fn errStr(p: *Parser, tag: Diagnostics.Tag, tok_i: TokenIndex, str: []const 
 
 pub fn errExtra(p: *Parser, tag: Diagnostics.Tag, tok_i: TokenIndex, extra: Diagnostics.Message.Extra) Compilation.Error!void {
     @setCold(true);
-    const tok = p.pp.tokens.get(tok_i);
+    const tok = p.tokens.get(tok_i);
     var loc = tok.loc;
     if (tok_i != 0 and tok.id == .eof) {
         // if the token is EOF, point at the end of the previous token instead
-        const prev = p.pp.tokens.get(tok_i - 1);
+        const prev = p.tokens.get(tok_i - 1);
         loc = prev.loc;
         loc.byte_offset += @intCast(p.tokSlice(tok_i - 1).len);
     }
@@ -503,7 +501,7 @@ fn getNode(p: *Parser, node: NodeIndex, tag: Tree.Tag) ?NodeIndex {
     }
 }
 
-fn pragma(p: *Parser) Compilation.Error!bool {
+fn pragma(p: *Parser, pp: *@import("Preprocessor.zig")) Compilation.Error!bool {
     var found_pragma = false;
     while (p.eatToken(.keyword_pragma)) |_| {
         found_pragma = true;
@@ -515,7 +513,7 @@ fn pragma(p: *Parser) Compilation.Error!bool {
         const pragma_len = @as(TokenIndex, @intCast(end_idx)) - p.tok_i;
         defer p.tok_i += pragma_len + 1; // skip past .nl as well
         if (p.comp.getPragma(name)) |prag| {
-            try prag.parserCB(p, p.tok_i);
+            try prag.parserCB(pp, p, p.tok_i);
         }
     }
     return found_pragma;
@@ -556,54 +554,54 @@ fn diagnoseIncompleteDefinitions(p: *Parser) !void {
 }
 
 /// root : (decl | assembly ';' | staticAssert)*
-pub fn parse(pp: *Preprocessor) Compilation.Error!Tree {
-    pp.comp.pragmaEvent(.before_parse);
+pub fn parse(comp: *Compilation, tokens: *Token.List) Compilation.Error!Tree {
+    comp.pragmaEvent(.before_parse);
 
-    var arena = std.heap.ArenaAllocator.init(pp.comp.gpa);
+    var arena = std.heap.ArenaAllocator.init(comp.gpa);
     errdefer arena.deinit();
     var p = Parser{
-        .pp = pp,
-        .comp = pp.comp,
-        .gpa = pp.comp.gpa,
+        .comp = comp,
+        .tokens = tokens,
+        .gpa = comp.gpa,
         .arena = arena.allocator(),
-        .tok_ids = pp.tokens.items(.id),
-        .strings = std.ArrayList(u8).init(pp.comp.gpa),
-        .value_map = Tree.ValueMap.init(pp.comp.gpa),
-        .data = NodeList.init(pp.comp.gpa),
-        .labels = std.ArrayList(Label).init(pp.comp.gpa),
-        .list_buf = NodeList.init(pp.comp.gpa),
-        .decl_buf = NodeList.init(pp.comp.gpa),
-        .param_buf = std.ArrayList(Type.Func.Param).init(pp.comp.gpa),
-        .enum_buf = std.ArrayList(Type.Enum.Field).init(pp.comp.gpa),
-        .record_buf = std.ArrayList(Type.Record.Field).init(pp.comp.gpa),
-        .field_attr_buf = std.ArrayList([]const Attribute).init(pp.comp.gpa),
+        .tok_ids = tokens.items(.id),
+        .strings = std.ArrayList(u8).init(comp.gpa),
+        .value_map = Tree.ValueMap.init(comp.gpa),
+        .data = NodeList.init(comp.gpa),
+        .labels = std.ArrayList(Label).init(comp.gpa),
+        .list_buf = NodeList.init(comp.gpa),
+        .decl_buf = NodeList.init(comp.gpa),
+        .param_buf = std.ArrayList(Type.Func.Param).init(comp.gpa),
+        .enum_buf = std.ArrayList(Type.Enum.Field).init(comp.gpa),
+        .record_buf = std.ArrayList(Type.Record.Field).init(comp.gpa),
+        .field_attr_buf = std.ArrayList([]const Attribute).init(comp.gpa),
         .string_ids = .{
-            .declspec_id = try pp.comp.intern("__declspec"),
-            .main_id = try pp.comp.intern("main"),
-            .file = try pp.comp.intern("FILE"),
-            .jmp_buf = try pp.comp.intern("jmp_buf"),
-            .sigjmp_buf = try pp.comp.intern("sigjmp_buf"),
-            .ucontext_t = try pp.comp.intern("ucontext_t"),
+            .declspec_id = try comp.intern("__declspec"),
+            .main_id = try comp.intern("main"),
+            .file = try comp.intern("FILE"),
+            .jmp_buf = try comp.intern("jmp_buf"),
+            .sigjmp_buf = try comp.intern("sigjmp_buf"),
+            .ucontext_t = try comp.intern("ucontext_t"),
         },
     };
     errdefer {
-        p.nodes.deinit(pp.comp.gpa);
+        p.nodes.deinit(comp.gpa);
         p.strings.deinit();
         p.value_map.deinit();
     }
     defer {
         p.data.deinit();
         p.labels.deinit();
-        p.syms.deinit(pp.comp.gpa);
+        p.syms.deinit(comp.gpa);
         p.list_buf.deinit();
         p.decl_buf.deinit();
         p.param_buf.deinit();
         p.enum_buf.deinit();
         p.record_buf.deinit();
-        p.record_members.deinit(pp.comp.gpa);
-        p.attr_buf.deinit(pp.comp.gpa);
-        p.attr_application_buf.deinit(pp.comp.gpa);
-        p.tentative_defs.deinit(pp.comp.gpa);
+        p.record_members.deinit(comp.gpa);
+        p.attr_buf.deinit(comp.gpa);
+        p.attr_application_buf.deinit(comp.gpa);
+        p.tentative_defs.deinit(comp.gpa);
         assert(p.field_attr_buf.items.len == 0);
         p.field_attr_buf.deinit();
     }
@@ -625,12 +623,12 @@ pub fn parse(pp: *Preprocessor) Compilation.Error!Tree {
             .data = .{ .sub_type = elem_ty },
         }, 0, .none);
 
-        const ty = &pp.comp.types.va_list;
+        const ty = &comp.types.va_list;
         try p.syms.defineTypedef(&p, try p.comp.intern("__builtin_va_list"), ty.*, 0, .none);
 
         if (ty.isArray()) ty.decayArray();
 
-        try p.syms.defineTypedef(&p, try p.comp.intern("__NSConstantString"), pp.comp.types.ns_constant_string.ty, 0, .none);
+        try p.syms.defineTypedef(&p, try p.comp.intern("__NSConstantString"), comp.types.ns_constant_string.ty, 0, .none);
     }
 
     while (p.eatToken(.eof) == null) {
@@ -676,21 +674,21 @@ pub fn parse(pp: *Preprocessor) Compilation.Error!Tree {
     }
 
     const root_decls = try p.decl_buf.toOwnedSlice();
-    errdefer pp.comp.gpa.free(root_decls);
+    errdefer comp.gpa.free(root_decls);
     if (root_decls.len == 0) {
         try p.errTok(.empty_translation_unit, p.tok_i - 1);
     }
-    pp.comp.pragmaEvent(.after_parse);
+    comp.pragmaEvent(.after_parse);
 
     const data = try p.data.toOwnedSlice();
-    errdefer pp.comp.gpa.free(data);
+    errdefer comp.gpa.free(data);
     const strings = try p.strings.toOwnedSlice();
-    errdefer pp.comp.gpa.free(strings);
+    errdefer comp.gpa.free(strings);
     return Tree{
-        .comp = pp.comp,
-        .tokens = pp.tokens.slice(),
+        .comp = comp,
+        .tokens = tokens.slice(),
         .arena = arena,
-        .generated = pp.comp.generated_buf.items,
+        .generated = comp.generated_buf.items,
         .nodes = p.nodes.toOwnedSlice(),
         .data = data,
         .root_decls = root_decls,
@@ -1895,7 +1893,7 @@ fn typeSpec(p: *Parser, ty: *Type.Builder) Error!bool {
 }
 
 fn getAnonymousName(p: *Parser, kind_tok: TokenIndex) !StringId {
-    const loc = p.pp.tokens.items(.loc)[kind_tok];
+    const loc = p.tokens.items(.loc)[kind_tok];
     const source = p.comp.getSource(loc.id);
     const line_col = source.lineCol(loc);
 
@@ -2063,7 +2061,7 @@ fn recordSpec(p: *Parser) Error!Type {
             // TODO: msvc considers `#pragma pack` on a per-field basis
             .msvc => p.pragma_pack,
         };
-        record_layout.compute(record_ty, ty, p.pp.comp, pragma_pack_value);
+        record_layout.compute(record_ty, ty, p.comp, pragma_pack_value);
     }
 
     // finish by creating a node
@@ -3333,7 +3331,7 @@ fn findScalarInitializer(p: *Parser, il: **InitList, ty: *Type, actual_ty: Type,
         return false;
     } else if (ty.get(.@"struct")) |struct_ty| {
         if (il.*.node != .none) return false;
-        if (actual_ty.eql(ty.*, p.pp.comp, false)) return true;
+        if (actual_ty.eql(ty.*, p.comp, false)) return true;
         const start_index = il.*.list.items.len;
         var index = if (start_index != 0) il.*.list.items[start_index - 1].index + 1 else start_index;
 
@@ -3353,14 +3351,14 @@ fn findScalarInitializer(p: *Parser, il: **InitList, ty: *Type, actual_ty: Type,
         return false;
     } else if (ty.get(.@"union")) |union_ty| {
         if (il.*.node != .none) return false;
-        if (actual_ty.eql(ty.*, p.pp.comp, false)) return true;
+        if (actual_ty.eql(ty.*, p.comp, false)) return true;
         if (union_ty.data.record.fields.len == 0) {
             try p.errTok(.empty_aggregate_init_braces, first_tok);
             return error.ParsingFailed;
         }
         ty.* = union_ty.data.record.fields[0].ty;
         il.* = try il.*.find(p.gpa, 0);
-        // if (il.*.node == .none and actual_ty.eql(ty, p.pp.comp, false)) return true;
+        // if (il.*.node == .none and actual_ty.eql(ty, p.comp, false)) return true;
         if (try p.findScalarInitializer(il, ty, actual_ty, first_tok)) return true;
         return false;
     }
@@ -5946,7 +5944,7 @@ fn removeUnusedWarningForTok(p: *Parser, last_expr_tok: TokenIndex) void {
     if (last_expr_tok == 0) return;
     if (p.comp.diag.list.items.len == 0) return;
 
-    const last_expr_loc = p.pp.tokens.items(.loc)[last_expr_tok];
+    const last_expr_loc = p.tokens.items(.loc)[last_expr_tok];
     const last_msg = p.comp.diag.list.items[p.comp.diag.list.items.len - 1];
 
     if (last_msg.tag == .unused_value and last_msg.loc.eql(last_expr_loc)) {
@@ -7132,7 +7130,7 @@ fn primaryExpr(p: *Parser) Error!Result {
         .pp_num => return p.ppNum(),
         .embed_byte => {
             assert(!p.in_macro);
-            const loc = p.pp.tokens.items(.loc)[p.tok_i];
+            const loc = p.tokens.items(.loc)[p.tok_i];
             p.tok_i += 1;
             const buf = p.comp.getSource(.generated).buf[loc.byte_offset..];
             var byte: u8 = buf[0] - '0';

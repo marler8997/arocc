@@ -69,7 +69,7 @@ fn diagnosticHandler(self: *GCC, pp: *Preprocessor, start_idx: TokenIndex) Pragm
     const diagnostic_tok = pp.tokens.get(start_idx);
     if (diagnostic_tok.id == .nl) return;
 
-    const diagnostic = std.meta.stringToEnum(Directive.Diagnostics, pp.expandedSlice(diagnostic_tok)) orelse
+    const diagnostic = std.meta.stringToEnum(Directive.Diagnostics, @import("../expand.zig").expandedSlice(pp.comp, diagnostic_tok)) orelse
         return error.UnknownPragma;
 
     switch (diagnostic) {
@@ -173,13 +173,13 @@ fn preprocessorHandler(pragma: *Pragma, pp: *Preprocessor, start_idx: TokenIndex
     }
 }
 
-fn parserHandler(pragma: *Pragma, p: *Parser, start_idx: TokenIndex) Compilation.Error!void {
+fn parserHandler(pragma: *Pragma, pp: *Preprocessor, p: *Parser, start_idx: TokenIndex) Compilation.Error!void {
     var self = @fieldParentPtr(GCC, "pragma", pragma);
-    const directive_tok = p.pp.tokens.get(start_idx + 1);
+    const directive_tok = p.tokens.get(start_idx + 1);
     if (directive_tok.id == .nl) return;
-    const name = p.pp.expandedSlice(directive_tok);
+    const name = @import("../expand.zig").expandedSlice(p.comp, directive_tok);
     if (mem.eql(u8, name, "diagnostic")) {
-        return self.diagnosticHandler(p.pp, start_idx + 2) catch |err| switch (err) {
+        return self.diagnosticHandler(pp, start_idx + 2) catch |err| switch (err) {
             error.UnknownPragma => {}, // handled during preprocessing
             error.StopPreprocessing => unreachable, // Only used by #pragma once
             else => |e| return e,

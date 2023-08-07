@@ -457,7 +457,7 @@ fn processSource(
         return;
     }
 
-    var tree = try Parser.parse(&pp);
+    var tree = try Parser.parse(d.comp, &pp.tokens);
     defer tree.deinit();
 
     if (d.verbose_ast) {
